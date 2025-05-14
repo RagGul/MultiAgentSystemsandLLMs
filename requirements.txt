@@ -1,0 +1,8 @@
+aiohttp
+numpy<2
+pandas
+pybullet
+streamlit
+tqdm
+scipy
+watchdog  
