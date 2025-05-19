@@ -1,66 +1,100 @@
-import streamlit as st, asyncio
+import streamlit as st
+import asyncio
 from src.config import Config
 from src.adaptive_play.agent import Agent
 from src.adaptive_play.adaptive_play_algorithm import AdaptivePlay
 from src.llm_integration.query_interface import QueryInterface
 
-def run_sim_with_bar():
-    """Synchronous wrapper so we don't nest asyncio.run inside Streamlit."""
+# ------------------------------------------------------------------
+# Run MAS and stream live log (no graph)
+# ------------------------------------------------------------------
+def _run_sim_live():
     agents = [Agent(f"Agent_{i}") for i in range(Config.NUM_AGENTS)]
     play   = AdaptivePlay(agents)
 
-    bar = st.progress(0.0)
+    bar  = st.progress(0.0)
+    log  = st.empty()
+
+    # set up a fresh event loop for our async calls
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
     for step in range(Config.NUM_ITERATIONS):
-        loop.run_until_complete(play.run(1))   # one iteration at a time
+        active = agents[step % len(agents)].agent_id
+        # advance one iteration
+        loop.run_until_complete(play.run(1))
+
+        # grab the latest distribution for this agent
+        dist = play.history[-1].get(active, {}) if play.history else {}
+
+        # every EXPLANATION_INTERVAL steps, ask the LLM to turn it into human-friendly text
+        if dist and step % Config.EXPLANATION_INTERVAL == 0:
+            qi = QueryInterface(play.history)
+            explanation = loop.run_until_complete(
+                qi.answer(
+                    f"Step {step}: Agent {active} has distribution {dist}. "
+                    "Generate a human-friendly INFO log entry describing these probabilities."
+                )
+            )
+            log.markdown(f"[INFO] [{active}] {explanation}")
+        else:
+            # show raw dict for debugging when not explaining
+            log.markdown(f"[DEBUG] [{active}] {dist}")
+
+        # update progress bar
         bar.progress((step + 1) / Config.NUM_ITERATIONS)
+
     loop.close()
     return agents, play
 
-
+# ------------------------------------------------------------------
+# Streamlit main
+# ------------------------------------------------------------------
 def app():
-    st.title("MAS Adaptive‑Play + LLM Interpretability")
+    st.set_page_config(page_title="MAS + LLM", layout="centered")
+    st.title("THESIS PROJECT")
 
-    if "run_done" not in st.session_state:
-        st.session_state["run_done"] = False
+    # initialize our session state
+    if "done" not in st.session_state:
+        st.session_state.done = False
 
-    if not st.session_state.run_done:
-        if st.button("Run Simulation"):
-            agents, play = run_sim_with_bar()
-            st.session_state["agents"] = agents
+    # first view: run the sim
+    if not st.session_state.done:
+        if st.button("Run Simulation", type="primary"):
+            agents, play = _run_sim_live()
+            st.session_state["done"]    = True
+            st.session_state["agents"]  = agents
             st.session_state["history"] = play.history
-            st.session_state["anoms"] = play.anomalies_seen
-            st.session_state.run_done = True
-            st.experimental_rerun()
-    else:
-        st.success("Simulation finished!")
-        st.subheader("Final probabilities (first 10 agents)")
-        for ag in st.session_state["agents"][:10]:
-            st.write(f"{ag.agent_id} → {ag.probabilities}")
+            st.session_state["anoms"]   = play.anomalies_seen
+        else:
+            st.info("Click the button to start. Tweak parameters as needed.")
 
-        # show anomalies if any
-        st.subheader("Anomalies detected during run")
-        if st.session_state["anoms"]:
-            for note in st.session_state["anoms"]:
+    # after running: show results
+    if st.session_state.done:
+        st.success("Simulation complete")
+        st.subheader("Final probabilities")
+        for ag in st.session_state.agents:
+            st.write(f"{ag.agent_id}: {ag.probabilities}")
+
+        st.subheader("Anomalies")
+        if st.session_state.anoms:
+            for note in st.session_state.anoms:
                 st.warning(note)
         else:
-            st.info("No anomalies exceeded the threshold.")
+            st.info("None detected")
 
-        # interactive query box
         st.markdown("---")
-        st.subheader("Ask a question about recent behaviour")
-        question = st.text_input("Your question")
-        if st.button("Ask") and question:
-            qi = QueryInterface(st.session_state["history"])
-            # if Streamlit is already in an async loop use ensure_future
-            loop = asyncio.get_event_loop()
-            answer = loop.run_until_complete(qi.answer(question)) if not loop.is_running() else asyncio.ensure_future(qi.answer(question))
-            st.info(answer)
+        q = st.text_input("Ask about the run")
+        if st.button("Ask") and q:
+            qi   = QueryInterface(st.session_state.history)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            ans  = loop.run_until_complete(qi.answer(q))
+            loop.close()
+            st.info(ans)
 
-        # reset button for a fresh run
-        if st.button("Reset and run again"):
-            for key in ("run_done", "agents", "history", "anoms"):
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.experimental_rerun()
+        # allow one more full re-run
+        if st.button("Run again"):
+            for k in ("done", "agents", "history", "anoms"):
+                st.session_state.pop(k, None)
+

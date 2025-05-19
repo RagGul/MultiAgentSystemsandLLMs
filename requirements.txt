@@ -1,8 +1,10 @@
 aiohttp
 numpy<2
 pandas
-pybullet
 streamlit
 tqdm
-scipy
-watchdog  
+networkx
+matplotlib
+pybullet
+watchdog
+pytest

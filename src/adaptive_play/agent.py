@@ -1,35 +1,69 @@
-from __future__ import annotations
 import numpy as np
-from numpy.random import default_rng
-_rng = default_rng()
+from src.config import Config
+
 
 class Agent:
-    def __init__(self, agent_id: str, actions=None):
+    """One MAS agent with ε-greedy action selection and TD-style learning."""
+
+    def __init__(self, agent_id: str):
         self.agent_id = agent_id
-        self.actions  = actions or ["A", "B"]
-        p = 1/len(self.actions)
-        self.probabilities = {a: p for a in self.actions}
-        self._prev_prob    = self.probabilities.copy()
+        self.actions = ["A", "B"]
 
-    def choose_action(self):
-        actions, probs = zip(*self.probabilities.items())
-        return _rng.choice(actions, p=probs)
-
-    def update_strategy(self, global_actions):
+        # random non-uniform start so learning dynamics are visible
+        rnd = np.random.rand(2)
+        rnd /= rnd.sum()
+        self.probabilities = dict(zip(self.actions, rnd))
         self._prev_prob = self.probabilities.copy()
-        counts = {a: 0 for a in self.actions}
-        for a in global_actions.values():
-            counts[a] += 1
-        best = max(counts, key=counts.get)
-        alpha = 0.1
-        for a in self.actions:
-            if a == best:
-                self.probabilities[a] = min(self.probabilities[a] + alpha, 1)
-            else:
-                self.probabilities[a] = max(self.probabilities[a] - alpha/(len(self.actions)-1), 0)
+
+    # ───────────────────────────────────────────────
+    def renorm(self):
         s = sum(self.probabilities.values())
         for a in self.actions:
             self.probabilities[a] /= s
 
-    def delta_max(self):
-        return max(abs(self.probabilities[a]-self._prev_prob[a]) for a in self.actions)
+    # ───────────────────────────────────────────────
+    def choose_action(self, step: int) -> str:
+        eps = max(Config.EPS_MIN, Config.EPS_START * (Config.EPS_DECAY ** step))
+        if np.random.rand() < eps:
+            return np.random.choice(self.actions)
+        return max(self.probabilities, key=self.probabilities.get)
+
+    # ───────────────────────────────────────────────
+    def learn(self, action: str, reward: float, step: int):
+        """TD-like update: move prob mass toward the chosen action."""
+        alpha = max(
+            Config.ALPHA_MIN, Config.ALPHA_START * (Config.ALPHA_DECAY ** step)
+        )
+        for a in self.actions:
+            target = 1.0 if a == action else 0.0
+            self.probabilities[a] += alpha * (target - self.probabilities[a])
+        self.renorm()
+
+    # ───────────────────────────────────────────────
+    def update_strategy_from_vector(self, neigh: dict[str, dict[str, float]], step: int):
+        """Blend neighbour vectors (after LLM parse)."""
+        alpha = max(
+            Config.ALPHA_MIN, Config.ALPHA_START * (Config.ALPHA_DECAY ** step)
+        )
+        agg, valid = {a: 0.0 for a in self.actions}, 0
+        for probs in neigh.values():
+            if not isinstance(probs, dict):
+                continue
+            if probs and all(a in probs for a in self.actions):
+                valid += 1
+                for a in self.actions:
+                    agg[a] += probs[a]
+        if not valid:
+            return
+        for a in agg:
+            agg[a] /= valid
+
+        self._prev_prob = self.probabilities.copy()
+        for a in self.actions:
+            self.probabilities[a] = (1 - alpha) * self.probabilities[a] + alpha * agg[a]
+        self.renorm()
+
+    def delta_max(self) -> float:
+        return max(
+            abs(self.probabilities[a] - self._prev_prob[a]) for a in self.actions
+        )
